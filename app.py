@@ -1,4 +1,6 @@
 import os
+import urllib.parse
+import xml.etree.ElementTree as ET
 import requests
 from flask import Flask, render_template, request, jsonify
 from google import genai
@@ -7,65 +9,104 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-# Yahan quotes ke andar apni AIzaSy... wali asli Gemini API key daalein (os.getenv nahi lagana hai)
-client = genai.Client(api_key=os.getenv("AQ.Ab8RN6I8xnowIAFq0sWRJGGeQ8UpUf_Z4VxmjahVXsXZB640HQ"))
+api_key = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key) if api_key else None
 
-def fetch_reddit_leads(keyword):
+def fetch_web_hiring_leads(keyword, location=""):
+    """Fetches real-time hiring posts across Reddit, LinkedIn & Web via Google RSS (Never blocked on cloud servers)"""
     leads = []
-    url = f"https://www.reddit.com/r/DesignJobs+forhire+freelance_forhire/search.json?q={keyword}&restrict_sr=1&sort=new&t=week&limit=10"
-    headers = {"User-Agent": "LeadScoutAI/1.0"}
+    loc_query = f" {location}" if location else ""
+    query = urllib.parse.quote(f'("hiring" OR "looking for" OR "need a") "{keyword}"{loc_query}')
+    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(rss_url, timeout=10)
         if res.status_code == 200:
-            posts = res.json().get("data", {}).get("children", [])
-            for post in posts:
-                data = post["data"]
-                title = data.get("title", "")
-                selftext = data.get("selftext", "")
-                if "[hiring]" in title.lower() or "looking for" in title.lower() or "need a" in title.lower():
-                    if "[for hire]" not in title.lower():
-                        leads.append({
-                            "source": "Reddit",
-                            "title": title,
-                            "description": selftext[:350] + "..." if len(selftext) > 350 else selftext,
-                            "url": f"https://www.reddit.com{data.get('permalink')}"
-                        })
+            root = ET.fromstring(res.content)
+            for item in root.findall(".//item")[:6]:
+                title = item.find("title").text if item.find("title") is not None else ""
+                link = item.find("link").text if item.find("link") is not None else ""
+                pub_date = item.find("pubDate").text if item.find("pubDate") is not None else "Recent"
+                source_el = item.find("source")
+                source_name = source_el.text if source_el is not None else "Web Lead"
+                
+                leads.append({
+                    "source": source_name,
+                    "title": title,
+                    "description": f"Published: {pub_date[:16]} | Matched Keyword: {keyword}{loc_query}",
+                    "url": link
+                })
     except Exception as e:
-        print("Reddit Error:", e)
+        print("Web RSS Error:", e)
     return leads
 
 def fetch_remotive_leads(keyword):
+    """Fetches strictly matched remote jobs"""
     leads = []
-    url = f"https://remotive.com/api/remote-jobs?search={keyword}&limit=5"
+    url = f"https://remotive.com/api/remote-jobs?search={urllib.parse.quote(keyword)}"
     try:
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             jobs = res.json().get("jobs", [])
-            for job in jobs[:5]:
-                leads.append({
-                    "source": "Remotive Job",
-                    "title": f"{job.get('title')} - {job.get('company_name')}",
-                    "description": f"Location: {job.get('candidate_required_location', 'Remote')} | Category: {job.get('category')}",
-                    "url": job.get("url")
-                })
+            kw_lower = keyword.lower()
+            for job in jobs:
+                title = job.get("title", "")
+                tags = " ".join(job.get("tags", [])).lower()
+                # Strict filter so unrelated jobs don't repeat
+                if kw_lower in title.lower() or kw_lower in tags or any(word in title.lower() for word in kw_lower.split()):
+                    leads.append({
+                        "source": "Remotive",
+                        "title": f"{title} at {job.get('company_name')}",
+                        "description": f"Location: {job.get('candidate_required_location', 'Worldwide')} | Type: {job.get('job_type', 'Contract/Full-time')}",
+                        "url": job.get("url")
+                    })
+                if len(leads) >= 4:
+                    break
     except Exception as e:
         print("Remotive Error:", e)
     return leads
 
-def generate_human_pitch(lead_title, lead_desc, user_skill, user_portfolio):
-    prompt = f"""
-    You are an expert freelancer/business owner applying for a client lead.
-    Client Post Title: {lead_title}
-    Client Details: {lead_desc}
-    My Skill/Service: {user_skill}
-    My Portfolio/Proof: {user_portfolio}
+def fetch_arbeitnow_leads(keyword):
+    """Fetches fresh international & European/Global jobs"""
+    leads = []
+    url = "https://www.arbeitnow.com/api/job-board-api"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            jobs = res.json().get("data", [])
+            kw_words = keyword.lower().split()
+            for job in jobs:
+                title = job.get("title", "")
+                if any(w in title.lower() for w in kw_words):
+                    leads.append({
+                        "source": "Arbeitnow",
+                        "title": f"{title} — {job.get('company_name')}",
+                        "description": f"Location: {job.get('location', 'Remote')} | Remote: {job.get('remote', True)}",
+                        "url": job.get("url")
+                    })
+                if len(leads) >= 4:
+                    break
+    except Exception as e:
+        print("Arbeitnow Error:", e)
+    return leads
 
-    Write a short, punchy, human-sounding outreach message (max 70 words).
-    RULES:
-    - NEVER start with "I hope this message finds you well" or "Dear Sir/Madam".
-    - Start directly by addressing their exact problem/need.
-    - Mention my relevant experience and include my portfolio/contact naturally.
-    - End with a simple, low-friction question to start a chat.
+def generate_human_pitch(lead_title, lead_desc, user_skill, user_portfolio):
+    if not client:
+        return "API Key missing in Render Environment Variables. Please add GEMINI_API_KEY."
+    
+    prompt = f"""
+    You are an expert freelancer or agency owner reaching out to a potential client.
+    Lead Title: {lead_title}
+    Lead Context: {lead_desc}
+    My Expertise: {user_skill}
+    My Portfolio/Contact: {user_portfolio}
+
+    Write a unique, tailored, natural-sounding outreach pitch in clear, professional English (55 to 75 words).
+    STRICT RULES:
+    - NEVER use generic openings like "I hope this message finds you well" or "Dear Sir/Madam".
+    - Reference specific details from the Lead Title so every pitch feels 100% custom-written for that exact client.
+    - Highlight how my {user_skill} expertise solves their need, and smoothly include {user_portfolio}.
+    - End with a short, conversational call-to-action question.
     """
     try:
         response = client.models.generate_content(
@@ -74,7 +115,7 @@ def generate_human_pitch(lead_title, lead_desc, user_skill, user_portfolio):
         )
         return response.text.strip()
     except Exception as e:
-        return f"Hi! Saw your post about '{lead_title}'. I specialize in {user_skill} and would love to help. Check my work here: {user_portfolio}"
+        return f"[AI Error: {str(e)[:80]}] — Hi, regarding '{lead_title}', I specialize in {user_skill} and can help deliver this quickly. Work samples: {user_portfolio}"
 
 @app.route("/")
 def home():
@@ -83,15 +124,30 @@ def home():
 @app.route("/api/hunt", methods=["POST"])
 def hunt_leads():
     data = request.json
-    keyword = data.get("keyword", "Graphic Design")
-    portfolio = data.get("portfolio", "Available on request")
+    keyword = data.get("keyword", "").strip()
+    location = data.get("location", "").strip()
+    portfolio = data.get("portfolio", "Available upon request").strip()
 
-    all_leads = fetch_reddit_leads(keyword) + fetch_remotive_leads(keyword)
-    
+    if not keyword:
+        return jsonify({"leads": []})
+
+    all_leads = (
+        fetch_web_hiring_leads(keyword, location)
+        + fetch_remotive_leads(keyword)
+        + fetch_arbeitnow_leads(keyword)
+    )
+
+    # Remove duplicate titles
+    seen = set()
+    unique_leads = []
+    for lead in all_leads:
+        if lead["title"] not in seen:
+            seen.add(lead["title"])
+            unique_leads.append(lead)
+
     enriched_leads = []
-    for lead in all_leads[:8]:
-        pitch = generate_human_pitch(lead["title"], lead["description"], keyword, portfolio)
-        lead["pitch"] = pitch
+    for lead in unique_leads[:8]:
+        lead["pitch"] = generate_human_pitch(lead["title"], lead["description"], keyword, portfolio)
         enriched_leads.append(lead)
 
     return jsonify({"leads": enriched_leads})
