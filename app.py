@@ -1,156 +1,86 @@
 import os
-import urllib.parse
-import xml.etree.ElementTree as ET
 import requests
-from flask import Flask, render_template, request, jsonify
-from google import genai
-from dotenv import load_dotenv
-
-load_dotenv()
+from flask import Flask, request, jsonify
+import google.generativeai as genai
 
 app = Flask(__name__)
-api_key = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key) if api_key else None
 
-def fetch_web_hiring_leads(keyword, location=""):
-    """Fetches real-time hiring posts across Reddit, LinkedIn & Web via Google RSS (Never blocked on cloud servers)"""
-    leads = []
-    loc_query = f" {location}" if location else ""
-    query = urllib.parse.quote(f'("hiring" OR "looking for" OR "need a") "{keyword}"{loc_query}')
-    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    
-    try:
-        res = requests.get(rss_url, timeout=10)
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            for item in root.findall(".//item")[:6]:
-                title = item.find("title").text if item.find("title") is not None else ""
-                link = item.find("link").text if item.find("link") is not None else ""
-                pub_date = item.find("pubDate").text if item.find("pubDate") is not None else "Recent"
-                source_el = item.find("source")
-                source_name = source_el.text if source_el is not None else "Web Lead"
-                
-                leads.append({
-                    "source": source_name,
-                    "title": title,
-                    "description": f"Published: {pub_date[:16]} | Matched Keyword: {keyword}{loc_query}",
-                    "url": link
-                })
-    except Exception as e:
-        print("Web RSS Error:", e)
-    return leads
+# ==========================================
+# 1. API KEYS SETUP
+# ==========================================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "TUMHARI_GEMINI_KEY")
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "TUMHARI_GOOGLE_MAPS_KEY_YAHAN_DAALO")
 
-def fetch_remotive_leads(keyword):
-    """Fetches strictly matched remote jobs"""
-    leads = []
-    url = f"https://remotive.com/api/remote-jobs?search={urllib.parse.quote(keyword)}"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            jobs = res.json().get("jobs", [])
-            kw_lower = keyword.lower()
-            for job in jobs:
-                title = job.get("title", "")
-                tags = " ".join(job.get("tags", [])).lower()
-                # Strict filter so unrelated jobs don't repeat
-                if kw_lower in title.lower() or kw_lower in tags or any(word in title.lower() for word in kw_lower.split()):
-                    leads.append({
-                        "source": "Remotive",
-                        "title": f"{title} at {job.get('company_name')}",
-                        "description": f"Location: {job.get('candidate_required_location', 'Worldwide')} | Type: {job.get('job_type', 'Contract/Full-time')}",
-                        "url": job.get("url")
-                    })
-                if len(leads) >= 4:
-                    break
-    except Exception as e:
-        print("Remotive Error:", e)
-    return leads
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-def fetch_arbeitnow_leads(keyword):
-    """Fetches fresh international & European/Global jobs"""
-    leads = []
-    url = "https://www.arbeitnow.com/api/job-board-api"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            jobs = res.json().get("data", [])
-            kw_words = keyword.lower().split()
-            for job in jobs:
-                title = job.get("title", "")
-                if any(w in title.lower() for w in kw_words):
-                    leads.append({
-                        "source": "Arbeitnow",
-                        "title": f"{title} — {job.get('company_name')}",
-                        "description": f"Location: {job.get('location', 'Remote')} | Remote: {job.get('remote', True)}",
-                        "url": job.get("url")
-                    })
-                if len(leads) >= 4:
-                    break
-    except Exception as e:
-        print("Arbeitnow Error:", e)
-    return leads
-
-def generate_human_pitch(lead_title, lead_desc, user_skill, user_portfolio):
-    if not client:
-        return "API Key missing in Render Environment Variables. Please add GEMINI_API_KEY."
-    
+# ==========================================
+# 2. WHATSAPP / CALL SCRIPT GENERATOR
+# ==========================================
+def generate_whatsapp_script(client_name):
     prompt = f"""
-    You are an expert freelancer or agency owner reaching out to a potential client.
-    Lead Title: {lead_title}
-    Lead Context: {lead_desc}
-    My Expertise: {user_skill}
-    My Portfolio/Contact: {user_portfolio}
-
-    Write a unique, tailored, natural-sounding outreach pitch in clear, professional English (55 to 75 words).
-    STRICT RULES:
-    - NEVER use generic openings like "I hope this message finds you well" or "Dear Sir/Madam".
-    - Reference specific details from the Lead Title so every pitch feels 100% custom-written for that exact client.
-    - Highlight how my {user_skill} expertise solves their need, and smoothly include {user_portfolio}.
-    - End with a short, conversational call-to-action question.
+    Write a very short, polite WhatsApp outreach message (Hinglish/English mix) for a client named '{client_name}'.
+    I am Md Rushan, a graphic designer and owner of a Custom Mirror Fitting & Barrisol Premium Ceiling business.
+    
+    Key points to include:
+    - We provide 3D stretch ceilings and custom glass/mirror fitting.
+    - We operate on a 'Direct-to-Site' model (no showroom, we bring samples directly to their office/site).
+    - Ask for a quick 2-minute call to discuss potential collaboration.
+    
+    Keep it under 60 words. Make it sound human and professional.
     """
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        return response.text.strip()
-    except Exception as e:
-        return f"[AI Error: {str(e)[:80]}] — Hi, regarding '{lead_title}', I specialize in {user_skill} and can help deliver this quickly. Work samples: {user_portfolio}"
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception:
+        return "Namaste! Hum Barrisol Premium Ceiling aur Custom Mirrors ka direct-to-site kaam karte hain. Kya hum ek choti call par connect kar sakte hain?"
 
-@app.route("/")
-def home():
-    return render_template("index.html")
-
-@app.route("/api/hunt", methods=["POST"])
-def hunt_leads():
+# ==========================================
+# 3. REAL PHONE NUMBERS ROUTE (Google Places API)
+# ==========================================
+@app.route('/api/get-real-contacts', methods=['POST'])
+def get_real_contacts():
     data = request.json
-    keyword = data.get("keyword", "").strip()
-    location = data.get("location", "").strip()
-    portfolio = data.get("portfolio", "Available upon request").strip()
+    niche = data.get('niche', 'Interior Designers')
+    location = data.get('location', 'Okhla, New Delhi')
+    
+    query = f"{niche} in {location}"
+    
+    # Google Places Text Search API (Official method to get real phone numbers)
+    url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&key={GOOGLE_MAPS_API_KEY}"
+    
+    try:
+        response = requests.get(url).json()
+        results = response.get('results', [])
+        
+        leads = []
+        # Top 5 leads nikalna
+        for place in results[:5]:
+            place_id = place.get('place_id')
+            name = place.get('name')
+            address = place.get('formatted_address')
+            
+            # Phone number nikalne ke liye Place Details API call
+            details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields=formatted_phone_number&key={GOOGLE_MAPS_API_KEY}"
+            details_response = requests.get(details_url).json()
+            
+            phone_number = details_response.get('result', {}).get('formatted_phone_number', 'Number not public')
+            
+            # Agar phone number available hai, tabhi lead save karo
+            if phone_number != 'Number not public':
+                whatsapp_script = generate_whatsapp_script(name)
+                
+                leads.append({
+                    "business_name": name,
+                    "phone_number": phone_number,
+                    "address": address,
+                    "whatsapp_pitch": whatsapp_script
+                })
+                
+        return jsonify({"status": "success", "total_contacts_found": len(leads), "data": leads})
 
-    if not keyword:
-        return jsonify({"leads": []})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-    all_leads = (
-        fetch_web_hiring_leads(keyword, location)
-        + fetch_remotive_leads(keyword)
-        + fetch_arbeitnow_leads(keyword)
-    )
-
-    # Remove duplicate titles
-    seen = set()
-    unique_leads = []
-    for lead in all_leads:
-        if lead["title"] not in seen:
-            seen.add(lead["title"])
-            unique_leads.append(lead)
-
-    enriched_leads = []
-    for lead in unique_leads[:8]:
-        lead["pitch"] = generate_human_pitch(lead["title"], lead["description"], keyword, portfolio)
-        enriched_leads.append(lead)
-
-    return jsonify({"leads": enriched_leads})
-
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
